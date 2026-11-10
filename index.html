@@ -103,6 +103,12 @@ a.teams{
   box-shadow:0 4px 0 var(--gold-dark);
 }
 a.teams:hover{filter:brightness(1.05)}
+.teams.disabled{
+  width:100%; font:inherit; font-size:1.25rem; font-weight:800; cursor:not-allowed; text-align:center;
+  color:#555; background:#e6e2d3; border:2px dashed #a79f84; box-shadow:none; padding:15px 20px; border-radius:14px; filter:none;
+}
+.note b{color:var(--green-800)}
+.note.warn{color:var(--danger); font-weight:600}
 a.teams:focus-visible{outline:3px solid var(--green-700); outline-offset:3px}
 .note{margin:12px 0 0; font-size:.95rem; color:var(--muted); text-align:center}
 /* ===== Footer ===== */
@@ -219,12 +225,69 @@ function card(i){
       <div class="info-box"><div class="k">📅 تاريخ الاختبار</div><div class="v">${esc(DATA.dateLabels[r[2]])}</div></div>
       <div class="info-box"><div class="k">⏰ وقت الاختبار</div><div class="v">${esc(DATA.times[r[3]])}</div></div>
     </div>
-    <div class="foot">
-      <a class="teams" href="${safe}" target="_blank" rel="noopener noreferrer">الدخول إلى الاختبار عبر Microsoft Teams ◂</a>
-      <p class="note">يرجى الدخول في الموعد المحدد لك.</p>
-    </div>
+    <div class="foot" data-i="${i}"></div>
   </article>`;
 }
+
+/* ---------- تفعيل زر Teams حسب الموعد ---------- */
+const OPEN_BEFORE_MIN = 30;   // يُفتح الزر قبل بداية الاختبار بـ 30 دقيقة
+const CLOSE_AFTER_MIN = 60;   // ويُغلق بعد نهاية الاختبار بـ 60 دقيقة
+let clockOffset = 0;          // فرق الوقت بين الخادم وجهاز الزائر
+
+function cairoWallNow(){
+  const p=new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Cairo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(new Date(Date.now()+clockOffset));
+  const g=k=>+p.find(x=>x.type===k).value;
+  return Date.UTC(g('year'),g('month')-1,g('day'),g('hour')%24,g('minute'),g('second'));
+}
+function slotTimes(i){
+  const r=DATA.rows[i];
+  const [y,m,d]=DATA.dates[r[2]].split('-').map(Number);
+  const mm=[...DATA.times[r[3]].matchAll(/(\d{1,2}):(\d{2})\s*([صم])/g)].map(x=>{
+    let h=+x[1]%12; if(x[3]==='م') h+=12; return h*60+ +x[2];
+  });
+  if(mm.length<2) return null;
+  const base=Date.UTC(y,m-1,d);
+  return {open:base+(mm[0]-OPEN_BEFORE_MIN)*60000, start:base+mm[0]*60000, end:base+mm[1]*60000, close:base+(mm[1]+CLOSE_AFTER_MIN)*60000};
+}
+function clock12(ms){
+  const d=new Date(ms); let h=d.getUTCHours(), mi=d.getUTCMinutes(); const ap=h>=12?'م':'ص';
+  h=h%12||12; return h+':'+String(mi).padStart(2,'0')+' '+ap;
+}
+function remaining(ms){
+  const mins=Math.max(1,Math.ceil(ms/60000)), h=Math.floor(mins/60), m=mins%60;
+  const parts=[]; if(h) parts.push(h===1?'ساعة':h===2?'ساعتان':h+' ساعات'); if(m) parts.push(m===1?'دقيقة':m===2?'دقيقتان':m+(m<=10?' دقائق':' دقيقة'));
+  return parts.join(' و ');
+}
+function refreshFeet(){
+  const now=cairoWallNow();
+  document.querySelectorAll('.foot[data-i]').forEach(el=>{
+    const i=+el.dataset.i, s=slotTimes(i); if(!s) return;
+    const link=DATA.links[DATA.rows[i][4]];
+    const safe=/^https:\/\/teams\.microsoft\.com\//.test(link)?link:'#';
+    let state = now<s.open?'before':(now<=s.close?'open':'after');
+    if(el.dataset.state===state && state!=='before') return;
+    el.dataset.state=state;
+    if(state==='open'){
+      el.innerHTML=`<a class="teams" href="${safe}" target="_blank" rel="noopener noreferrer">الدخول إلى الاختبار عبر Microsoft Teams ◂</a>
+        <p class="note">الرابط متاح الآن حتى الساعة <b>${clock12(s.close)}</b>. يرجى الدخول في الموعد المحدد لك.</p>`;
+    }else if(state==='before'){
+      const sameDay = Math.floor(now/86400000)===Math.floor(s.open/86400000);
+      el.innerHTML=`<button type="button" class="teams disabled" disabled>🔒 الرابط غير متاح الآن</button>
+        <p class="note">يُفتح الزر قبل موعدك بنصف ساعة: <b>${esc(DATA.dateLabels[DATA.rows[i][2]])} الساعة ${clock12(s.open)}</b>${sameDay?'<br>متبقي على فتح الزر: <b>'+remaining(s.open-now)+'</b>':''}</p>`;
+    }else{
+      el.innerHTML=`<button type="button" class="teams disabled" disabled>انتهت فترة الدخول</button>
+        <p class="note warn">انتهى الوقت المتاح للدخول إلى هذا الاختبار، يرجى التواصل مع إدارة المنصة.</p>`;
+    }
+  });
+}
+setInterval(refreshFeet,15000);
+/* مزامنة الوقت مع خادم الصفحة (لتفادي خطأ ساعة جهاز الزائر) */
+try{
+  const t0=Date.now();
+  fetch(location.href.split('#')[0],{method:'HEAD',cache:'no-store'}).then(r=>{
+    const h=r.headers.get('Date'); if(h){ const srv=Date.parse(h); if(!isNaN(srv)) clockOffset=srv-(t0+Date.now())/2; refreshFeet(); }
+  }).catch(()=>{});
+}catch(e){}
 
 function search(raw){
   const q0=digitsToLatin(raw||'').trim();
@@ -255,7 +318,7 @@ function notFound(){
   return '<div class="msg err">لم يتم العثور على بيانات مطابقة.<br><span style="font-weight:400">تأكد من كتابة الرقم القومي أو الاسم كما سجّلته في الاستمارة، أو تواصل مع إدارة المنصة.</span></div>';
 }
 
-$('f').addEventListener('submit',e=>{ e.preventDefault(); search($('q').value); out.scrollIntoView({behavior:'smooth',block:'nearest'}); });
+$('f').addEventListener('submit',e=>{ e.preventDefault(); search($('q').value); refreshFeet(); out.scrollIntoView({behavior:'smooth',block:'nearest'}); });
 </script>
 </body>
 </html>
